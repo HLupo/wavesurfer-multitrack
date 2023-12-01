@@ -10,6 +10,9 @@
     "multi-track"
   ],
   "type": "module",
+  "files": [
+    "dist"
+  ],
   "main": "dist/multitrack.js",
   "module": "dist/multitrack.js",
   "types": "dist/multitrack.d.ts",
