@@ -20,6 +20,16 @@ type SingleTrackOptions = Omit<
   'container' | 'minPxPerSec' | 'duration' | 'cursorColor' | 'cursorWidth' | 'interact' | 'hideScrollbar'
 >
 
+export type Media = {
+  Backcolor: string
+  Category: number
+  Duration: number
+  IMedia: number
+  Performer: string
+  Title: string
+  Version: string
+}
+
 export type TrackOptions = {
   id: TrackId
   url?: string
@@ -43,6 +53,7 @@ export type TrackOptions = {
     color?: string
   }
   options?: SingleTrackOptions
+  media?: Media
 }
 
 export type MultitrackOptions = {
@@ -55,6 +66,7 @@ export type MultitrackOptions = {
   rightButtonDrag?: boolean
   dragBounds?: boolean
   envelopeOptions?: EnvelopePluginOptions
+  timelineOptions?: TimelinePluginOptions
 }
 
 export type MultitrackEvents = {
@@ -67,6 +79,8 @@ export type MultitrackEvents = {
   'envelope-points-change': [{ id: TrackId; points: EnvelopePoint[] }]
   'volume-change': [{ id: TrackId; volume: number }]
   'intro-end-change': [{ id: TrackId; endTime: number }]
+  'click-track': [{ id: TrackId }]
+  'select-region': [{ id: TrackId; start: number; end: number; update: boolean }]
   drop: [{ id: TrackId }]
 }
 
@@ -84,7 +98,7 @@ class MultiTrack extends EventEmitter<MultitrackEvents> {
   private tracks: MultitrackTracks
   private options: MultitrackOptions
   private audios: Array<HTMLAudioElement | WebAudioPlayer> = []
-  private wavesurfers: Array<WaveSurfer> = []
+  public wavesurfers: Array<WaveSurfer> = []
   private envelopes: Array<EnvelopePlugin> = []
   private durations: Array<number> = []
   private currentTime = 0
@@ -92,8 +106,8 @@ class MultiTrack extends EventEmitter<MultitrackEvents> {
   private rendering: ReturnType<typeof initRendering>
   private frameRequest: number | null = null
   private subscriptions: Array<() => void> = []
-  private timeline: TimelinePlugin | null = null
   private audioContext: AudioContext
+  private timeline: TimelinePlugin | null = null
 
   static create(tracks: MultitrackTracks, options: MultitrackOptions): MultiTrack {
     return new MultiTrack(tracks, options)
@@ -133,9 +147,39 @@ class MultiTrack extends EventEmitter<MultitrackEvents> {
         }
       })
 
-      this.rendering.addClickHandler((position) => {
-        this.seekTo(position)
-      })
+      this.rendering.addClickHandler(
+        (position, selection) => {
+          console.log('Selection = ', selection)
+          if (!selection) this.seekTo(position)
+          else if (selection && !this.isPlaying()) this.seekTo(position)
+        },
+        (id) => {
+          this.emit('click-track', { id })
+        },
+        (id, start, end, update) => {
+          const duration = this.durations[id as number]
+          const startPosition = this.tracks[id as number].startPosition
+          const startTime = start * duration - startPosition
+          const endTime =
+            end * duration - startPosition > duration ? startPosition + duration : end * duration - startPosition
+
+          if (update) {
+            this.emit('select-region', {
+              id,
+              start: startTime,
+              end: endTime,
+              update: true,
+            })
+          } else {
+            this.emit('select-region', {
+              id,
+              start: startTime,
+              end: endTime,
+              update: false,
+            })
+          }
+        },
+      )
 
       this.emit('canplay')
     })
@@ -143,14 +187,14 @@ class MultiTrack extends EventEmitter<MultitrackEvents> {
 
   private initDurations(durations: number[]) {
     this.durations = durations
-
+    console.log('Durationsss = ', durations)
     this.maxDuration = this.tracks.reduce((max, track, index) => {
       return Math.max(max, track.startPosition + durations[index])
     }, 0)
 
     const placeholderAudio = this.audios[this.audios.length - 1] as WebAudioPlayer
     placeholderAudio.duration = this.maxDuration
-    this.durations[this.durations.length - 1] = this.maxDuration
+    // this.durations[this.durations.length - 1] = this.maxDuration
 
     this.rendering.setMainWidth(durations, this.maxDuration)
   }
@@ -373,17 +417,6 @@ class MultiTrack extends EventEmitter<MultitrackEvents> {
     this.initTimeline()
   }
 
-  private initTimeline() {
-    if (this.timeline) this.timeline.destroy()
-
-    this.timeline = this.wavesurfers[0].registerPlugin(
-      TimelinePlugin.create({
-        duration: this.maxDuration,
-        container: this.rendering.containers[0].parentElement,
-      } as TimelinePluginOptions),
-    )
-  }
-
   private updatePosition(time: number, autoCenter = false) {
     const precisionSeconds = 0.3
     const isPaused = !this.isPlaying()
@@ -475,6 +508,10 @@ class MultiTrack extends EventEmitter<MultitrackEvents> {
     onFrame()
   }
 
+  public getMaxDuration() {
+    return this.maxDuration
+  }
+
   public play() {
     if (this.audioContext && this.audioContext.state === 'suspended') {
       this.audioContext.resume()
@@ -522,6 +559,11 @@ class MultiTrack extends EventEmitter<MultitrackEvents> {
     this.initTimeline()
   }
 
+  // win-mam usage
+  public updateWidth(width: number) {
+    this.rendering.setMainWidth(this.durations, this.maxDuration, width)
+  }
+
   public addTrack(track: TrackOptions) {
     const index = this.tracks.findIndex((t) => t.id === track.id)
     if (index !== -1) {
@@ -535,6 +577,20 @@ class MultiTrack extends EventEmitter<MultitrackEvents> {
         const container = this.rendering.containers[index]
         container.innerHTML = ''
 
+        const header = document.createElement('div')
+        header.className = 'header'
+        header.style.top = '0'
+        header.style.height = '20px'
+        header.style.width = '100%'
+        header.style.backgroundColor = track.media?.Backcolor || '#000'
+        header.style.display = 'flex'
+        header.style.alignItems = 'center'
+        const mediaTitle = document.createElement('span')
+        const textContent = track.media ? track.media.Title + ' - ' + track.media.Performer : 'no title'
+        mediaTitle.textContent = textContent
+        header.appendChild(mediaTitle)
+        container.appendChild(header)
+
         this.wavesurfers[index].destroy()
         this.wavesurfers[index] = this.initWavesurfer(track, index)
 
@@ -543,13 +599,25 @@ class MultiTrack extends EventEmitter<MultitrackEvents> {
           (delta: number) => this.onDrag(index, delta),
           this.options.rightButtonDrag,
         )
-        this.wavesurfers[index].once('destroy', unsubscribe)
 
+        this.wavesurfers[index].once('destroy', unsubscribe)
         this.initTimeline()
 
         this.emit('canplay')
       })
     }
+  }
+
+  private initTimeline() {
+    if (this.timeline) this.timeline.destroy()
+
+    this.timeline = this.wavesurfers[0].registerPlugin(
+      TimelinePlugin.create({
+        container: this.rendering.containers[0].parentElement,
+        duration: this.maxDuration,
+        ...this.options.timelineOptions,
+      } as TimelinePluginOptions),
+    )
   }
 
   public destroy() {
@@ -594,6 +662,7 @@ function initRendering(tracks: MultitrackTracks, options: MultitrackOptions) {
   const scroll = document.createElement('div')
   scroll.setAttribute('style', 'width: 100%; overflow-x: scroll; overflow-y: hidden; user-select: none;')
   const wrapper = document.createElement('div')
+  wrapper.setAttribute('id', 'wrapper')
   wrapper.style.position = 'relative'
   scroll.appendChild(wrapper)
   options.container.appendChild(scroll)
@@ -663,6 +732,16 @@ function initRendering(tracks: MultitrackTracks, options: MultitrackOptions) {
     })
   }
 
+  const setSelectionColor = (id: TrackId) => {
+    tracks.forEach((track, index) => {
+      if (track.id === id) {
+        containers[index].style.background = '#4E4E4E'
+      } else {
+        containers[index].style.background = '#444444'
+      }
+    })
+  }
+
   return {
     containers,
 
@@ -670,10 +749,12 @@ function initRendering(tracks: MultitrackTracks, options: MultitrackOptions) {
     setContainerOffsets,
 
     // Set the container width
-    setMainWidth: (trackDurations: number[], maxDuration: number) => {
+    setMainWidth: (trackDurations: number[], maxDuration: number, width = 0) => {
       durations = trackDurations
       pxPerSec = Math.max(options.minPxPerSec || 0, clientWidth / maxDuration)
       mainWidth = pxPerSec * maxDuration
+      // winmam
+      if (mainWidth < width) mainWidth = width
       wrapper.style.width = `${mainWidth}px`
       setContainerOffsets()
     },
@@ -687,19 +768,90 @@ function initRendering(tracks: MultitrackTracks, options: MultitrackOptions) {
       const center = clientWidth / 2
       const minScroll = autoCenter ? center : clientWidth
       const pos = position * mainWidth
-
       if (pos > scrollLeft + minScroll || pos < scrollLeft) {
         scroll.scrollLeft = pos - center
       }
     },
 
     // Click to seek
-    addClickHandler: (onClick: (position: number) => void) => {
+    addClickHandler: (
+      onClick: (position: number, selection: boolean) => void,
+      onClickTrack: (trackId: TrackId) => void,
+      onDragTrack: (trackId: TrackId, start: number, end: number, update: boolean) => void,
+    ) => {
+      let start = 0
+      let end = 0
+      let selecting = false
+
       wrapper.addEventListener('click', (e) => {
         const rect = wrapper.getBoundingClientRect()
         const x = e.clientX - rect.left
         const position = x / wrapper.offsetWidth
-        onClick(position)
+
+        if (selecting === true) {
+          const posX = Math.min(start, end)
+          const pos = posX / wrapper.offsetWidth
+          selecting = false
+          start = 0
+          end = 0
+          onClick(pos, true)
+        } else onClick(position, false)
+      })
+
+      tracks.forEach((track, index) => {
+        const cont = containers[index]
+
+        cont?.addEventListener('click', (e) => {
+          setSelectionColor(track.id)
+          onClickTrack(track.id)
+        })
+
+        cont?.addEventListener('pointerdown', (e) => {
+          const rect = wrapper.getBoundingClientRect()
+
+          start = e.clientX - rect.left
+          selecting = true
+        })
+
+        cont?.addEventListener('pointermove', (e) => {
+          const offset = wrapper.offsetWidth != cont.offsetWidth ? cont.offsetWidth : wrapper.offsetWidth
+          const rect = wrapper.getBoundingClientRect()
+          end = e.clientX - rect.left
+
+          if (start !== end && selecting) {
+            // Send an update to WinMam
+            if (start < end) onDragTrack(track.id, start / offset, end / offset, true)
+            else onDragTrack(track.id, end / offset, start / offset, true)
+          }
+        })
+
+        cont?.addEventListener('pointerup', (e) => {
+          const offset = wrapper.offsetWidth != cont.offsetWidth ? cont.offsetWidth : wrapper.offsetWidth
+          const rect = wrapper.getBoundingClientRect()
+
+          end = e.clientX - rect.left
+
+          if (start !== end && selecting) {
+            if (start < end) onDragTrack(track.id, start / offset, end / offset, false)
+            else onDragTrack(track.id, end / offset, start / offset, false)
+          } else selecting = false
+        })
+
+        cont?.addEventListener('pointerleave', (e) => {
+          const offset = wrapper.offsetWidth != cont.offsetWidth ? cont.offsetWidth : wrapper.offsetWidth
+
+          if (selecting) {
+            if (e.clientX < cont.getBoundingClientRect().left) {
+              onDragTrack(track.id, 0, start / offset, false)
+            }
+            if (e.clientX > cont.getBoundingClientRect().right) {
+              onDragTrack(track.id, start / offset, Infinity, false)
+            }
+            selecting = false
+            start = 0
+            end = 0
+          }
+        })
       })
     },
 
@@ -726,17 +878,19 @@ function initRendering(tracks: MultitrackTracks, options: MultitrackOptions) {
 function initDragging(container: HTMLElement, onDrag: (delta: number) => void, rightButtonDrag = false) {
   let overallWidth = 0
 
+  const containerHeader = container.childNodes[0] as HTMLElement
+
   const unsubscribe = makeDraggable(
-    container,
+    containerHeader,
     (dx: number) => {
       onDrag(dx / overallWidth)
     },
     () => {
-      container.style.cursor = 'grabbing'
+      containerHeader.style.cursor = 'grabbing'
       overallWidth = container.parentElement?.offsetWidth ?? 0
     },
     () => {
-      container.style.cursor = 'grab'
+      containerHeader.style.cursor = 'grab'
     },
     5,
     rightButtonDrag ? 2 : 0,
@@ -744,14 +898,14 @@ function initDragging(container: HTMLElement, onDrag: (delta: number) => void, r
 
   const preventDefault = (e: Event) => e.preventDefault()
 
-  container.style.cursor = 'grab'
+  containerHeader.style.cursor = 'grab'
 
   if (rightButtonDrag) {
     container.addEventListener('contextmenu', preventDefault)
   }
 
   return () => {
-    container.style.cursor = ''
+    containerHeader.style.cursor = ''
     unsubscribe()
     if (rightButtonDrag) {
       container.removeEventListener('contextmenu', preventDefault)
